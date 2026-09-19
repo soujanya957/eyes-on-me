@@ -73,3 +73,20 @@ def test_parse_sample_protocol_example():
     assert (s.yaw, s.pitch, s.roll) == (17.84, -0.46, 1.37)
     assert parse_sample(b"not json") is None
     assert parse_sample(b'{"version":2}') is None
+
+
+def test_arm_uses_wider_envelope():
+    m = mapper()
+    t = m.arm_target(yaw=60, pitch=40, roll=0)
+    assert t.yaw_deg == 60.0  # fits in ±70 arm yaw, would clamp to 25 for the body
+    assert t.pitch_deg == -40.0
+    assert m.arm_target(yaw=100, pitch=0, roll=0).yaw_deg == 70.0
+
+
+def test_camera_for_yaw():
+    from eyes_on_me.camera import camera_for_yaw
+    assert camera_for_yaw(0) == "front"
+    assert camera_for_yaw(-5) == "front-right"
+    assert camera_for_yaw(60) == "left"
+    assert camera_for_yaw(-60) == "right"
+    assert camera_for_yaw(170) == "back"

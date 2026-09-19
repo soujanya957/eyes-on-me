@@ -5,6 +5,8 @@ requires-python = ">=3.12"
 dependencies = [
     "bosdyn-api>=5.2.0",
     "bosdyn-client>=5.2.0",
+    "numpy>=1.26",
+    "opencv-python>=4.9",
     "python-dotenv>=1.0",
 ]
 

@@ -11,12 +11,19 @@ from dataclasses import dataclass
 
 from bosdyn.client import create_standard_sdk
 from bosdyn.client.estop import EstopClient, EstopEndpoint, EstopKeepAlive
-from bosdyn.client.frame_helpers import get_odom_tform_body
+from bosdyn.client.frame_helpers import GRAV_ALIGNED_BODY_FRAME_NAME, get_odom_tform_body
+from bosdyn.client.image import ImageClient
 from bosdyn.client.lease import LeaseClient, LeaseKeepAlive
-from bosdyn.client.robot_command import RobotCommandBuilder, RobotCommandClient, blocking_stand
+from bosdyn.client.robot_command import (
+    RobotCommandBuilder,
+    RobotCommandClient,
+    block_until_arm_arrives,
+    blocking_stand,
+)
 from bosdyn.client.robot_state import RobotStateClient
 from bosdyn.geometry import EulerZXY
 
+from .camera import CameraViewer
 from .gaze_mapper import BodyTarget, GazeMapper
 from .head_tracker import HeadTrackerReceiver
 
@@ -25,13 +32,18 @@ log = logging.getLogger("eyes_on_me")
 
 @dataclass
 class RunOptions:
-    mode: str = "pose"  # "pose" | "turn"
+    mode: str = "pose"  # "pose" | "turn" | "arm"
+    camera: str = "none"  # "none" | "auto" | a key of camera.SOURCES
     rate_hz: float = 20.0
     body_height: float = 0.0
     dry_run: bool = False
     external_estop: bool = False
     sit_on_exit: bool = True
     recenter_on_start: bool = True
+    # Where the gripper sits while it looks around (flat_body frame, metres).
+    hand_x: float = 0.6
+    hand_y: float = 0.0
+    hand_z: float = 0.45
 
 
 class StdinRecenter:
@@ -57,6 +69,7 @@ class SpotGaze:
         self._cmd: RobotCommandClient | None = None
         self._state: RobotStateClient | None = None
         self._heading0 = 0.0
+        self._viewer: CameraViewer | None = None
         if not opts.dry_run:
             sdk = create_standard_sdk("eyes-on-me")
             self.robot = sdk.create_robot(hostname)
@@ -93,10 +106,29 @@ class SpotGaze:
         blocking_stand(self._cmd, timeout_sec=10)
         self._heading0 = self._odom_yaw_deg()
 
+        if self.opts.mode == "arm":
+            assert self.robot.has_arm(), "--mode arm needs a Spot with an arm"
+            log.info("unstowing arm")
+            cmd_id = self._cmd.robot_command(RobotCommandBuilder.arm_ready_command())
+            block_until_arm_arrives(self._cmd, cmd_id, timeout_sec=10)
+            log.info("raising hand to look pose (%.2f, %.2f, %.2f)", self.opts.hand_x, self.opts.hand_y, self.opts.hand_z)
+            cmd_id = self._cmd.robot_command(self._arm_cmd(BodyTarget(0.0, 0.0, 0.0), seconds=2.0))
+            block_until_arm_arrives(self._cmd, cmd_id, timeout_sec=10)
+
+        if self.opts.camera != "none":
+            image_client = self.robot.ensure_client(ImageClient.default_service_name)
+            self._viewer = CameraViewer(image_client, self.opts.camera).start()
+
     def shutdown(self) -> None:
         if self.robot is None:
             return
         try:
+            if self._viewer:
+                self._viewer.stop()
+            if self.opts.mode == "arm" and self.robot.is_powered_on():
+                log.info("stowing arm")
+                cmd_id = self._cmd.robot_command(RobotCommandBuilder.arm_stow_command())
+                block_until_arm_arrives(self._cmd, cmd_id, timeout_sec=10)
             if self.opts.sit_on_exit and self.robot.is_powered_on():
                 log.info("sitting and powering off")
                 self.robot.power_off(cut_immediately=False, timeout_sec=20)
@@ -111,8 +143,20 @@ class SpotGaze:
         snap = self._state.get_robot_state().kinematic_state.transforms_snapshot
         return math.degrees(get_odom_tform_body(snap).rot.to_yaw())
 
+    def _arm_cmd(self, t: BodyTarget, seconds: float):
+        """Hand held at a fixed spot in front of the body, pointing where the head points."""
+        q = EulerZXY(yaw=t.yaw_rad, roll=t.roll_rad, pitch=t.pitch_rad).to_quaternion()
+        return RobotCommandBuilder.arm_pose_command(
+            self.opts.hand_x, self.opts.hand_y, self.opts.hand_z, q.w, q.x, q.y, q.z,
+            GRAV_ALIGNED_BODY_FRAME_NAME, seconds=seconds,
+        )
+
     def _send(self, t: BodyTarget) -> None:
         if self.opts.dry_run:
+            return
+        if self.opts.mode == "arm":
+            # Short horizon so each new head sample re-targets the hand smoothly.
+            self._cmd.robot_command(self._arm_cmd(t, seconds=3.0 / self.opts.rate_hz))
             return
         orient = EulerZXY(yaw=t.yaw_rad, roll=t.roll_rad, pitch=t.pitch_rad)
         if self.opts.mode == "turn" and t.v_rot_rad_s != 0.0:
@@ -134,7 +178,8 @@ class SpotGaze:
         recenter = StdinRecenter()
         need_recenter = self.opts.recenter_on_start
         last_log = 0.0
-        log.info("mode=%s  press 'r' + Enter to recenter, Ctrl+C to stop", self.opts.mode)
+        log.info("mode=%s camera=%s  'r' + Enter (or 'r' in the camera window) recenters, Ctrl+C stops",
+                 self.opts.mode, self.opts.camera)
         while True:
             tick = time.monotonic()
             s = receiver.latest()
@@ -158,10 +203,21 @@ class SpotGaze:
             if self.opts.mode == "turn":
                 rel = 0.0 if self.opts.dry_run else (self._odom_yaw_deg() - self._heading0)
                 target = self.mapper.turn_target(s.yaw, s.pitch, s.roll, rel)
+            elif self.opts.mode == "arm":
+                target = self.mapper.arm_target(s.yaw, s.pitch, s.roll)
             else:
                 target = self.mapper.pose_target(s.yaw, s.pitch, s.roll)
 
             self._send(target)
+
+            if self._viewer:
+                self._viewer.update_auto(target.yaw_deg if self.opts.mode != "arm" else 0.0)
+                event = self._viewer.pump()
+                if event == "recenter":
+                    need_recenter = True
+                elif event == "quit":
+                    log.info("quit from camera window")
+                    return
 
             if self.opts.dry_run or tick - last_log > 0.5:
                 last_log = tick

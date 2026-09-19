@@ -89,10 +89,42 @@ uv run eyes-on-me --body-height -0.1           # stand lower
 | `pose` | Head yaw/pitch/roll → `synchro_stand_command` body orientation, clamped to ±25°/±20°/±12°.     |
 | `turn` | Same, but yaw beyond the body envelope becomes a capped turn-in-place velocity. Heading is   |
 |        | closed-loop on odometry, so Spot's *heading + body yaw* converges to your head yaw.           |
+| `arm`  | Spot Arm only. Stands, unstows, lifts the gripper to a look pose in front of the body, then   |
+|        | your head drives the gripper's orientation (±70°/±50°/±30°) via `arm_pose_command`. The      |
+|        | body stays still. The hand camera is shown by default. Arm is stowed on exit.               |
+
+### Cameras
+
+`--camera` opens a window with a live Spot camera:
+
+```bash
+uv run eyes-on-me --camera auto              # body camera that faces where you're looking
+uv run eyes-on-me --camera back              # fixed source
+uv run eyes-on-me --mode arm                 # hand camera by default
+uv run eyes-on-me --mode arm --camera none   # arm without a window
+```
+
+Sources: `front`, `front-right`, `left`, `right`, `back`, `hand`. In the window:
+`1`–`6` pick a camera, `0` back to auto, `r` recenter, `q` quit. Frames are
+fetched at ~10 fps on a background thread; the control loop is unaffected.
+
+### Arm mode
+
+```bash
+uv run eyes-on-me --mode arm                       # hand hovers at (0.6, 0, 0.45) m
+uv run eyes-on-me --mode arm --hand-pos 0.7 0 0.6  # higher / further out
+uv run eyes-on-me --mode arm --arm-max-yaw 90      # wider sweep
+```
+
+Position is in Spot's `flat_body` frame (x forward, y left, z up). Keep the
+hand clear of the body and the ground: at the default pose the arm has room
+to pitch down ~50° without touching anything, but check your `--hand-pos`
+with the arm's reach before widening the pitch limit. Ctrl+C stows the arm
+before sitting.
 
 ### Tuning flags
 
-`--max-yaw/--max-pitch/--max-roll`, `--*-gain`, `--deadband`, `--smoothing`,
+`--max-yaw/--max-pitch/--max-roll`, `--arm-max-*`, `--*-gain`, `--deadband`, `--smoothing`,
 `--invert-yaw`, `--no-invert-pitch`, `--invert-roll`, `--turn-kp`,
 `--max-turn-rate`, `--rate`. Run `uv run eyes-on-me -h` for defaults.
 
@@ -105,8 +137,8 @@ nose down). If Spot moves the wrong way on any axis, flip it with the matching
 * By default the tool registers its own e-stop endpoint (like the SDK's `wasd`
   example) and takes the body lease. Pass `--external-estop` to keep the
   tablet/estop GUI in charge instead.
-* `turn` mode makes Spot rotate. Start in `pose` mode, in open space, with the
-  e-stop within reach.
+* `turn` mode makes Spot rotate; `arm` mode swings the arm through a wide
+  envelope. Start in `pose` mode, in open space, with the e-stop within reach.
 * The UDP stream is unauthenticated loopback; don't forward it off-host.
 
 ## Layout
@@ -115,7 +147,8 @@ nose down). If Spot moves the wrong way on any axis, flip it with the matching
 eyes_on_me/
   head_tracker.py   UDP JSON receiver (latest-sample, drops stale)
   gaze_mapper.py    pure math: recenter, deadband, gain, smoothing, clamp, turn split
-  spot_gaze.py      lease / e-stop / power / control loop
+  camera.py         Spot image fetch thread + OpenCV window, yaw-based auto select
+  spot_gaze.py      lease / e-stop / power / arm / control loop
   cli.py            argparse entry point (`eyes-on-me`)
 tests/              pytest, no robot needed
 sony-head-tracker/  submodule (fork of NicholasSlattery/sony-head-tracker)
@@ -132,9 +165,8 @@ Everything below builds on the same `HeadSample` → `GazeMapper` → command
 pipeline; most are a new mode in `spot_gaze.py` plus a mapper function.
 
 **Perception**
-- **Gaze-directed camera** — pick which of Spot's five body cameras (or the
-  Spot CAM PTZ) to stream based on head yaw, so you get a live "what Spot sees
-  where I'm looking" view. With the PTZ, drive pan/tilt 1:1 with your head.
+- **Spot CAM PTZ** — same idea as `--camera auto` / `--mode arm`, but driving
+  the Spot CAM's pan/tilt 1:1 with your head (`bosdyn.client.spot_cam.ptz`).
 - **Look-then-walk** — in `turn` mode, hold your gaze for ~1.5 s and Spot
   walks a step toward what you're looking at (`synchro_trajectory_command_in_body_frame`).
 - **Attention logging** — record where you looked and what Spot's camera saw
@@ -146,8 +178,8 @@ pipeline; most are a new mode in `spot_gaze.py` plus a mapper function.
 - **Nod / shake gestures** — a quick pitch oscillation = "yes" (confirm, sit),
   yaw oscillation = "no" (cancel). The gyroscope field in the JSON stream is
   perfect for this — threshold on angular velocity, not angle.
-- **Dual mode with the arm** — if your Spot has an arm, map head to
-  gripper-camera pose (`arm_pose_command`) so you inspect things by looking.
+- **Arm + walk** — in `arm` mode, hold your gaze for a moment and Spot walks
+  toward what the gripper is pointing at; nod to open/close the gripper.
 
 **Interaction**
 - **Mutual gaze** — combine with a face detector on Spot's front camera: when

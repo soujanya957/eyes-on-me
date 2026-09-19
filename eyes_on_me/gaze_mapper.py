@@ -43,6 +43,11 @@ class GazeConfig:
     max_body_yaw_deg: float = 25.0
     max_body_pitch_deg: float = 20.0
     max_body_roll_deg: float = 12.0
+    # Gripper ("hand") orientation envelope for ``--mode arm``; the arm can
+    # look much further round than the body can tilt.
+    max_arm_yaw_deg: float = 70.0
+    max_arm_pitch_deg: float = 50.0
+    max_arm_roll_deg: float = 30.0
     # Scale head motion -> body motion (1.0 = one-to-one).
     yaw_gain: float = 1.0
     pitch_gain: float = 1.0
@@ -128,6 +133,16 @@ class GazeMapper:
             yaw_deg=clamp(y, -c.max_body_yaw_deg, c.max_body_yaw_deg),
             pitch_deg=clamp(p, -c.max_body_pitch_deg, c.max_body_pitch_deg),
             roll_deg=clamp(r, -c.max_body_roll_deg, c.max_body_roll_deg),
+        )
+
+    def arm_target(self, yaw: float, pitch: float, roll: float) -> BodyTarget:
+        """``arm`` mode: same mapping as ``pose`` but clamped to the hand envelope."""
+        c = self.cfg
+        y, p, r = self.head_to_body(yaw, pitch, roll)
+        return BodyTarget(
+            yaw_deg=clamp(y, -c.max_arm_yaw_deg, c.max_arm_yaw_deg),
+            pitch_deg=clamp(p, -c.max_arm_pitch_deg, c.max_arm_pitch_deg),
+            roll_deg=clamp(r, -c.max_arm_roll_deg, c.max_arm_roll_deg),
         )
 
     def turn_target(
