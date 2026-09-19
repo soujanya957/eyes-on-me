@@ -22,6 +22,7 @@ WH-1000XM5 ──BT──▶ sony-head-tracker ──UDP JSON :4243──▶ eye
 | [docs/run.md](docs/run.md)     | `viz` → `check` → `run`; modes, cameras, arm, keys, e-stop, tuning, safety |
 | [docs/testing.md](docs/testing.md) | tier 1: software tests you can run now; tier 2: headphones + Spot hardware checklist |
 | [docs/ideas.md](docs/ideas.md) | what else to build on this                                        |
+| [touchpad-controls/PLAN.md](touchpad-controls/PLAN.md) | plan: XM5 touchpad as a 5-button controller (walk/strafe/stop/sit/e-stop) |
 
 ## Quick reference
 
@@ -51,6 +52,7 @@ eyes_on_me/
   cli.py            entry point: `eyes-on-me [run|viz|check]`
 tests/              pytest, no robot needed
 docs/               setup.md, run.md, testing.md, ideas.md
+touchpad-controls/  PLAN.md (not built yet)
 scripts/
   run-tracker.sh    build + start the head-tracker bridge
   fake-tracker.py   synthetic tracker stream for testing without headphones

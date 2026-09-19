@@ -7,6 +7,7 @@ dependencies = [
     "bosdyn-client>=5.2.0",
     "numpy>=1.26",
     "opencv-python>=4.9",
+    "pyobjc-framework-quartz>=10 ; sys_platform == 'darwin'",
     "python-dotenv>=1.0",
 ]
 
