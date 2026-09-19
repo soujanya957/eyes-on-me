@@ -9,6 +9,11 @@ headphones via [sony-head-tracker](https://github.com/soujanya957/sony-head-trac
 WH-1000XM5 ──BT──▶ sony-head-tracker ──UDP JSON :4243──▶ eyes-on-me ──gRPC──▶ Spot
 ```
 
+<p align="center">
+  <img src="docs/img/viz.png" width="600" alt="eyes-on-me viz: 3D head gizmo following the headphones, with raw tracker angles, mapped Spot angles, and envelope bars">
+  <br><sub><code>uv run eyes-on-me viz</code> — headphones only, no robot needed</sub>
+</p>
+
 ## Docs
 
 | doc                          | what                                                                |
