@@ -20,6 +20,7 @@ WH-1000XM5 ──BT──▶ sony-head-tracker ──UDP JSON :4243──▶ eye
 | ---------------------------- | ------------------------------------------------------------------- |
 | [docs/setup.md](docs/setup.md) | clone, `uv sync`, build the head-tracker bridge, Input Monitoring |
 | [docs/run.md](docs/run.md)     | `viz` → `check` → `run`; modes, cameras, arm, keys, e-stop, tuning, safety |
+| [docs/testing.md](docs/testing.md) | tier 1: software tests you can run now; tier 2: headphones + Spot hardware checklist |
 | [docs/ideas.md](docs/ideas.md) | what else to build on this                                        |
 
 ## Quick reference
@@ -31,7 +32,7 @@ uv run eyes-on-me check           # robot pre-flight (read-only)
 uv run eyes-on-me                 # drive Spot, pose mode
 uv run eyes-on-me --mode turn     # + turn in place
 uv run eyes-on-me --mode arm      # gripper follows your head, hand cam
-uv run pytest
+./scripts/test-software.sh        # all software tests, no hardware
 ```
 
 Credentials go in a git-ignored `.env` (`SPOT_IP`, `SPOT_USER`, `SPOT_PASS`);
@@ -49,8 +50,11 @@ eyes_on_me/
   spot_gaze.py      lease / e-stop / power / arm / control loop
   cli.py            entry point: `eyes-on-me [run|viz|check]`
 tests/              pytest, no robot needed
-docs/               setup.md, run.md, ideas.md
-scripts/run-tracker.sh
+docs/               setup.md, run.md, testing.md, ideas.md
+scripts/
+  run-tracker.sh    build + start the head-tracker bridge
+  fake-tracker.py   synthetic tracker stream for testing without headphones
+  test-software.sh  tier-1 test runner
 sony-head-tracker/  submodule (fork of NicholasSlattery/sony-head-tracker)
 .env.example        template for SPOT_IP / SPOT_USER / SPOT_PASS
 ```
