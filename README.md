@@ -36,12 +36,18 @@ Check the mapping without a robot (prints what Spot *would* do):
 uv run eyes-on-me --dry-run
 ```
 
-Drive Spot (username/password via `BOSDYN_CLIENT_USERNAME` /
-`BOSDYN_CLIENT_PASSWORD`, or you'll be prompted):
+Put your robot's address and credentials in a git-ignored `.env`:
 
 ```bash
-uv run eyes-on-me 192.168.80.3                 # body tilt only, robot stays put
-uv run eyes-on-me 192.168.80.3 --mode turn     # also steps round for large yaw
+cp .env.example .env   # then edit SPOT_IP / SPOT_USER / SPOT_PASS
+```
+
+Then drive Spot (a hostname on the command line overrides `SPOT_IP`; if no
+password is set you'll be prompted):
+
+```bash
+uv run eyes-on-me                 # body tilt only, robot stays put
+uv run eyes-on-me --mode turn     # also steps round for large yaw
 ```
 
 Face forward and press `r` + Enter to recenter. Ctrl+C sits Spot and powers

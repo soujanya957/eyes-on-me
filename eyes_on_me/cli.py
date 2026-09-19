@@ -4,7 +4,11 @@ from __future__ import annotations
 
 import argparse
 import logging
+import os
 import sys
+from pathlib import Path
+
+from dotenv import load_dotenv
 
 from .gaze_mapper import GazeConfig, GazeMapper
 from .head_tracker import HeadTrackerReceiver
@@ -16,7 +20,8 @@ def build_parser() -> argparse.ArgumentParser:
         prog="eyes-on-me",
         description="Point Spot's body where your head is pointing, using Sony headphone head tracking.",
     )
-    p.add_argument("hostname", nargs="?", help="Spot IP/hostname (omit with --dry-run)")
+    p.add_argument("hostname", nargs="?", default=os.environ.get("SPOT_IP"),
+                   help="Spot IP/hostname (default: $SPOT_IP from .env; omit with --dry-run)")
     p.add_argument("--mode", choices=["pose", "turn"], default="pose",
                    help="pose: body tilt only (default, robot stays put). turn: also rotate in place for large yaw.")
     p.add_argument("--dry-run", action="store_true", help="print mapped body targets; never talk to Spot")
@@ -46,11 +51,26 @@ def build_parser() -> argparse.ArgumentParser:
     return p
 
 
+def load_env() -> None:
+    """Load ``.env`` from the repo root, then map SPOT_* onto the SDK's variables.
+
+    ``bosdyn.client.util.authenticate`` reads BOSDYN_CLIENT_USERNAME/PASSWORD;
+    SPOT_USER/SPOT_PASS are friendlier names for the same thing. Existing
+    environment variables always win over the file.
+    """
+    load_dotenv(Path(__file__).resolve().parent.parent / ".env")
+    load_dotenv()  # also honour a .env in the current directory
+    for src, dst in (("SPOT_USER", "BOSDYN_CLIENT_USERNAME"), ("SPOT_PASS", "BOSDYN_CLIENT_PASSWORD")):
+        if src in os.environ and dst not in os.environ:
+            os.environ[dst] = os.environ[src]
+
+
 def main(argv: list[str] | None = None) -> int:
+    load_env()
     args = build_parser().parse_args(argv)
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s", datefmt="%H:%M:%S")
     if not args.dry_run and not args.hostname:
-        print("error: hostname is required unless --dry-run", file=sys.stderr)
+        print("error: give a hostname or set SPOT_IP in .env (or use --dry-run)", file=sys.stderr)
         return 2
 
     cfg = GazeConfig(
