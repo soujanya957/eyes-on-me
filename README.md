@@ -42,15 +42,32 @@ You should see orientation lines scrolling. If it says
 `macOS denied IOHID listen access`, grant **Input Monitoring** to the binary
 (System Settings → Privacy & Security → Input Monitoring), then rerun.
 
-**Terminal 2 — sanity check the mapping, no robot:**
+**Terminal 2 — headphones only, see that tracking works:**
 
 ```bash
-uv run eyes-on-me --dry-run
+uv run eyes-on-me viz
 ```
 
-Turn your head; `body y/p/r` should follow. Left should be positive yaw,
-looking up should be negative pitch (Spot's nose-up). If an axis is backwards,
-note the matching `--invert-*` flag for later.
+Opens a window with a 3D head gizmo that follows yours, the raw tracker
+angles, the mapped Spot angles, and bars showing how much of the body
+envelope you're using (they turn red when clamped). `r` recenters, `a`
+toggles the body/arm envelope, `q` quits. Turn left: the nose should swing to
+the green (+y) side; look up: nose rises. If an axis is backwards, pass the
+matching `--invert-*` flag (viz accepts the same mapping flags as `run`).
+
+`uv run eyes-on-me --dry-run` prints the same numbers as text, no window.
+
+**Terminal 2 — pre-flight the robot:**
+
+```bash
+uv run eyes-on-me check
+```
+
+Read-only. Checks, in order: network reachability, credentials, robot
+ID/version, time sync, e-stop state and endpoints, who holds the body lease,
+battery, motor state, system faults, arm present, camera sources, and whether
+the head tracker is streaming locally. Fix anything marked `FAIL` before
+running; `warn` lines are informational (e.g. the tablet holding the lease).
 
 **Terminal 2 — drive Spot.** Credentials come from a git-ignored `.env`
 (`cp .env.example .env`, then set `SPOT_IP`, `SPOT_USER`, `SPOT_PASS`). Make
@@ -64,8 +81,22 @@ uv run eyes-on-me                 # pose mode: body tilt only, feet stay put
 
 What happens: connect → register e-stop → take lease → power on → stand →
 first head sample becomes "straight ahead" → body follows your head at 20 Hz.
-Press `r` + Enter any time to recenter. **Ctrl+C** sits Spot and powers off
-(`--no-sit` to leave it standing).
+**Ctrl+C** sits Spot and powers off (`--no-sit` to leave it standing).
+
+Keys while running (terminal keys need Enter; camera-window keys don't):
+
+| action                          | terminal      | camera window |
+| ------------------------------- | ------------- | ------------- |
+| recenter                        | `r` + Enter   | `r`           |
+| **E-STOP**: sit, then cut power | `e` + Enter   | `Space`       |
+| **E-STOP**: cut power now       | `E` + Enter   | `Esc`         |
+| quit normally (sit, power off)  | Ctrl+C        | `q`           |
+
+The software e-stop goes through the e-stop endpoint this process registers.
+"Cut now" drops motor power immediately (Spot falls if standing); "sit, then
+cut" is the SDK's `settle_then_cut`. After an e-stop the tool exits and
+leaves motors cut; clear it from the tablet or just rerun. With
+`--external-estop` the software e-stop is unavailable — use the tablet.
 
 Once pose mode feels right, in open space:
 
@@ -135,8 +166,10 @@ nose down). If Spot moves the wrong way on any axis, flip it with the matching
 ## Safety
 
 * By default the tool registers its own e-stop endpoint (like the SDK's `wasd`
-  example) and takes the body lease. Pass `--external-estop` to keep the
-  tablet/estop GUI in charge instead.
+  example) and takes the body lease; `e`/`E` in the terminal or Space/Esc in
+  the camera window trigger it. If this process dies, the endpoint stops
+  checking in and Spot stops within the 9 s timeout. Pass `--external-estop`
+  to keep the tablet/estop GUI in charge instead.
 * `turn` mode makes Spot rotate; `arm` mode swings the arm through a wide
   envelope. Start in `pose` mode, in open space, with the e-stop within reach.
 * The UDP stream is unauthenticated loopback; don't forward it off-host.
@@ -148,8 +181,10 @@ eyes_on_me/
   head_tracker.py   UDP JSON receiver (latest-sample, drops stale)
   gaze_mapper.py    pure math: recenter, deadband, gain, smoothing, clamp, turn split
   camera.py         Spot image fetch thread + OpenCV window, yaw-based auto select
+  viz.py            `eyes-on-me viz`: headphones-only 3D gizmo
+  check.py          `eyes-on-me check`: robot pre-flight
   spot_gaze.py      lease / e-stop / power / arm / control loop
-  cli.py            argparse entry point (`eyes-on-me`)
+  cli.py            argparse entry point: `eyes-on-me [run|viz|check]`
 tests/              pytest, no robot needed
 sony-head-tracker/  submodule (fork of NicholasSlattery/sony-head-tracker)
 scripts/run-tracker.sh

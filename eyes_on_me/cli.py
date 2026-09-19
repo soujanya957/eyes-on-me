@@ -16,10 +16,14 @@ from .head_tracker import HeadTrackerReceiver
 from .spot_gaze import RunOptions, SpotGaze
 
 
+SUBCOMMANDS = ("run", "viz", "check")
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
-        prog="eyes-on-me",
-        description="Point Spot's body where your head is pointing, using Sony headphone head tracking.",
+        prog="eyes-on-me run",
+        description="Point Spot's body where your head is pointing, using Sony headphone head tracking. "
+                    "Other subcommands: `eyes-on-me viz` (headphones only), `eyes-on-me check` (robot pre-flight).",
     )
     p.add_argument("hostname", nargs="?", default=os.environ.get("SPOT_IP"),
                    help="Spot IP/hostname (default: $SPOT_IP from .env; omit with --dry-run)")
@@ -75,15 +79,8 @@ def load_env() -> None:
             os.environ[dst] = os.environ[src]
 
 
-def main(argv: list[str] | None = None) -> int:
-    load_env()
-    args = build_parser().parse_args(argv)
-    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s", datefmt="%H:%M:%S")
-    if not args.dry_run and not args.hostname:
-        print("error: give a hostname or set SPOT_IP in .env (or use --dry-run)", file=sys.stderr)
-        return 2
-
-    cfg = GazeConfig(
+def cfg_from_args(args: argparse.Namespace) -> GazeConfig:
+    return GazeConfig(
         max_body_yaw_deg=args.max_yaw,
         max_body_pitch_deg=args.max_pitch,
         max_body_roll_deg=args.max_roll,
@@ -101,6 +98,41 @@ def main(argv: list[str] | None = None) -> int:
         turn_kp=args.turn_kp,
         max_turn_rate_rad_s=args.max_turn_rate,
     )
+
+
+def main(argv: list[str] | None = None) -> int:
+    load_env()
+    argv = list(sys.argv[1:] if argv is None else argv)
+    sub = argv.pop(0) if argv and argv[0] in SUBCOMMANDS else "run"
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s", datefmt="%H:%M:%S")
+
+    if sub == "viz":
+        from .viz import main as viz_main
+
+        vp = argparse.ArgumentParser(prog="eyes-on-me viz", description="Head-tracking gizmo; no robot needed.",
+                                     parents=[build_parser()], add_help=False, conflict_handler="resolve")
+        vp.add_argument("--arm", action="store_true", help="show the arm envelope instead of the body envelope")
+        va = vp.parse_args(argv)
+        return viz_main(va.udp_port, cfg_from_args(va), arm=va.arm)
+
+    if sub == "check":
+        from .check import main as check_main
+
+        cp = argparse.ArgumentParser(prog="eyes-on-me check", description="Spot pre-flight: network, auth, e-stop, lease, power, arm, cameras.")
+        cp.add_argument("hostname", nargs="?", default=os.environ.get("SPOT_IP"))
+        cp.add_argument("--udp-port", type=int, default=4243)
+        ca = cp.parse_args(argv)
+        if not ca.hostname:
+            print("error: give a hostname or set SPOT_IP in .env", file=sys.stderr)
+            return 2
+        return check_main(ca.hostname, ca.udp_port)
+
+    args = build_parser().parse_args(argv)
+    if not args.dry_run and not args.hostname:
+        print("error: give a hostname or set SPOT_IP in .env (or use --dry-run)", file=sys.stderr)
+        return 2
+
+    cfg = cfg_from_args(args)
     camera = args.camera if args.camera is not None else ("hand" if args.mode == "arm" else "none")
     opts = RunOptions(
         mode=args.mode,

@@ -104,7 +104,7 @@ class CameraViewer:
         self._auto_choice = camera_for_yaw(head_yaw_deg)
 
     def pump(self) -> str | None:
-        """Draw the latest frame; return a key event ('recenter', 'quit') if any."""
+        """Draw the latest frame; return a key event ('recenter', 'estop', 'estop_now', 'quit') if any."""
         with self._lock:
             frame, src = self._frame, self._frame_source
         if frame is not None:
@@ -112,6 +112,10 @@ class CameraViewer:
             cv2.putText(frame, src, (8, 22), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
             cv2.imshow(WINDOW, frame)
         key = cv2.waitKey(1) & 0xFF
+        if key == 27:  # Esc
+            return "estop_now"
+        if key == ord(" "):
+            return "estop"
         if key == ord("q"):
             return "quit"
         if key == ord("r"):

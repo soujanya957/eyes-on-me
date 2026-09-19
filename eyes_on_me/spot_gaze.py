@@ -46,17 +46,24 @@ class RunOptions:
     hand_z: float = 0.45
 
 
-class StdinRecenter:
-    """Press ``r`` + Enter in the terminal to re-zero without touching the app."""
+class StdinKeys:
+    """Terminal hotkeys (each followed by Enter): r recenter, e settle-then-cut, E cut now."""
 
     def __init__(self):
-        self.requested = threading.Event()
-        threading.Thread(target=self._run, daemon=True, name="stdin-recenter").start()
+        self.recenter = threading.Event()
+        self.estop = threading.Event()       # settle (sit) then cut motor power
+        self.estop_now = threading.Event()   # cut motor power immediately
+        threading.Thread(target=self._run, daemon=True, name="stdin-keys").start()
 
     def _run(self):
         for line in sys.stdin:
-            if line.strip().lower() == "r":
-                self.requested.set()
+            k = line.strip()
+            if k.lower() == "r":
+                self.recenter.set()
+            elif k == "e":
+                self.estop.set()
+            elif k in ("E", "!"):
+                self.estop_now.set()
 
 
 class SpotGaze:
@@ -70,6 +77,7 @@ class SpotGaze:
         self._state: RobotStateClient | None = None
         self._heading0 = 0.0
         self._viewer: CameraViewer | None = None
+        self.estopped = False
         if not opts.dry_run:
             sdk = create_standard_sdk("eyes-on-me")
             self.robot = sdk.create_robot(hostname)
@@ -119,12 +127,28 @@ class SpotGaze:
             image_client = self.robot.ensure_client(ImageClient.default_service_name)
             self._viewer = CameraViewer(image_client, self.opts.camera).start()
 
+    def estop(self, immediate: bool) -> None:
+        """Software e-stop through our own endpoint (unavailable with --external-estop)."""
+        if self._estop_keepalive is None:
+            log.error("E-STOP requested but this process holds no e-stop endpoint (--external-estop); use the tablet")
+            return
+        self.estopped = True
+        if immediate:
+            log.critical("E-STOP: cutting motor power NOW")
+            self._estop_keepalive.stop()
+        else:
+            log.critical("E-STOP: settling (sit) then cutting motor power")
+            self._estop_keepalive.settle_then_cut()
+
     def shutdown(self) -> None:
         if self.robot is None:
             return
         try:
             if self._viewer:
                 self._viewer.stop()
+            if self.estopped:
+                log.info("e-stopped; leaving motors cut. Clear it from the tablet or rerun.")
+                return
             if self.opts.mode == "arm" and self.robot.is_powered_on():
                 log.info("stowing arm")
                 cmd_id = self._cmd.robot_command(RobotCommandBuilder.arm_stow_command())
@@ -175,13 +199,21 @@ class SpotGaze:
     # ------------------------------------------------------------------ loop
     def run(self, receiver: HeadTrackerReceiver) -> None:
         period = 1.0 / self.opts.rate_hz
-        recenter = StdinRecenter()
+        keys = StdinKeys()
         need_recenter = self.opts.recenter_on_start
         last_log = 0.0
-        log.info("mode=%s camera=%s  'r' + Enter (or 'r' in the camera window) recenters, Ctrl+C stops",
-                 self.opts.mode, self.opts.camera)
+        log.info("mode=%s camera=%s", self.opts.mode, self.opts.camera)
+        log.info("keys (+Enter):  r recenter   e E-STOP (sit, then cut)   E E-STOP NOW   Ctrl+C quit")
+        if self._viewer:
+            log.info("camera window:  r recenter   Space E-STOP (sit, then cut)   Esc E-STOP NOW   q quit")
         while True:
             tick = time.monotonic()
+            if keys.estop_now.is_set():
+                self.estop(immediate=True)
+                return
+            if keys.estop.is_set():
+                self.estop(immediate=False)
+                return
             s = receiver.latest()
             if s is None:
                 if tick - last_log > 2.0:
@@ -192,8 +224,8 @@ class SpotGaze:
 
             if self.mapper.note_reset_counter(s.reset_counter):
                 log.info("headset re-zeroed itself (resetCounter=%d)", s.reset_counter)
-            if need_recenter or recenter.requested.is_set():
-                recenter.requested.clear()
+            if need_recenter or keys.recenter.is_set():
+                keys.recenter.clear()
                 need_recenter = False
                 self.mapper.recenter(s.yaw, s.pitch, s.roll)
                 if not self.opts.dry_run:
@@ -215,6 +247,12 @@ class SpotGaze:
                 event = self._viewer.pump()
                 if event == "recenter":
                     need_recenter = True
+                elif event == "estop":
+                    self.estop(immediate=False)
+                    return
+                elif event == "estop_now":
+                    self.estop(immediate=True)
+                    return
                 elif event == "quit":
                     log.info("quit from camera window")
                     return
