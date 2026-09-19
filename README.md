@@ -30,28 +30,57 @@ rerun. See `sony-head-tracker/docs/MACOS.md` for pairing and troubleshooting.
 
 ## Run
 
-Check the mapping without a robot (prints what Spot *would* do):
+Two terminals: one for the head tracker, one for Spot.
+
+**Terminal 1 — head tracker** (headphones paired and connected to the Mac):
+
+```bash
+./scripts/run-tracker.sh
+```
+
+You should see orientation lines scrolling. If it says
+`macOS denied IOHID listen access`, grant **Input Monitoring** to the binary
+(System Settings → Privacy & Security → Input Monitoring), then rerun.
+
+**Terminal 2 — sanity check the mapping, no robot:**
 
 ```bash
 uv run eyes-on-me --dry-run
 ```
 
-Put your robot's address and credentials in a git-ignored `.env`:
+Turn your head; `body y/p/r` should follow. Left should be positive yaw,
+looking up should be negative pitch (Spot's nose-up). If an axis is backwards,
+note the matching `--invert-*` flag for later.
+
+**Terminal 2 — drive Spot.** Credentials come from a git-ignored `.env`
+(`cp .env.example .env`, then set `SPOT_IP`, `SPOT_USER`, `SPOT_PASS`). Make
+sure the Mac is on the robot's network (`ping $SPOT_IP`), the robot is on with
+motors unlocked, and nothing else holds the lease (release control on the
+tablet or it will be stolen — that's expected).
 
 ```bash
-cp .env.example .env   # then edit SPOT_IP / SPOT_USER / SPOT_PASS
+uv run eyes-on-me                 # pose mode: body tilt only, feet stay put
 ```
 
-Then drive Spot (a hostname on the command line overrides `SPOT_IP`; if no
-password is set you'll be prompted):
+What happens: connect → register e-stop → take lease → power on → stand →
+first head sample becomes "straight ahead" → body follows your head at 20 Hz.
+Press `r` + Enter any time to recenter. **Ctrl+C** sits Spot and powers off
+(`--no-sit` to leave it standing).
+
+Once pose mode feels right, in open space:
 
 ```bash
-uv run eyes-on-me                 # body tilt only, robot stays put
-uv run eyes-on-me --mode turn     # also steps round for large yaw
+uv run eyes-on-me --mode turn     # also steps round when you look past ±25°
 ```
 
-Face forward and press `r` + Enter to recenter. Ctrl+C sits Spot and powers
-off (`--no-sit` to leave it standing).
+A hostname on the command line overrides `SPOT_IP`. Common variants:
+
+```bash
+uv run eyes-on-me --invert-yaw                 # yaw went the wrong way
+uv run eyes-on-me --smoothing 0.2 --deadband 3 # calmer
+uv run eyes-on-me --external-estop             # keep the tablet as e-stop
+uv run eyes-on-me --body-height -0.1           # stand lower
+```
 
 ### Modes
 
@@ -96,3 +125,44 @@ scripts/run-tracker.sh
 ```bash
 uv run pytest
 ```
+
+## Ideas: what else head tracking + Spot can do
+
+Everything below builds on the same `HeadSample` → `GazeMapper` → command
+pipeline; most are a new mode in `spot_gaze.py` plus a mapper function.
+
+**Perception**
+- **Gaze-directed camera** — pick which of Spot's five body cameras (or the
+  Spot CAM PTZ) to stream based on head yaw, so you get a live "what Spot sees
+  where I'm looking" view. With the PTZ, drive pan/tilt 1:1 with your head.
+- **Look-then-walk** — in `turn` mode, hold your gaze for ~1.5 s and Spot
+  walks a step toward what you're looking at (`synchro_trajectory_command_in_body_frame`).
+- **Attention logging** — record where you looked and what Spot's camera saw
+  there; a cheap way to collect "human-salient" frames for a dataset.
+
+**Teleop / control**
+- **Head as joystick** — pitch forward/back → v_x, roll → v_y, yaw → v_rot.
+  Hands-free driving; a WASD-free `wasd.py`.
+- **Nod / shake gestures** — a quick pitch oscillation = "yes" (confirm, sit),
+  yaw oscillation = "no" (cancel). The gyroscope field in the JSON stream is
+  perfect for this — threshold on angular velocity, not angle.
+- **Dual mode with the arm** — if your Spot has an arm, map head to
+  gripper-camera pose (`arm_pose_command`) so you inspect things by looking.
+
+**Interaction**
+- **Mutual gaze** — combine with a face detector on Spot's front camera: when
+  Spot sees you, it turns to face you; you turn your head, it mirrors. Two
+  agents doing active perception at each other.
+- **Spatial audio loop** — the XM5 already does head-tracked audio. Feed Spot's
+  microphone (or a beamformed direction) back so sounds from Spot's side stay
+  spatially fixed as you turn — a telepresence "ears on the robot".
+- **Follow-me with anticipation** — normal follow uses your body position; add
+  head yaw as a lead term so Spot starts turning before you do.
+
+**Research angles**
+- Compare fixed vs. head-driven camera selection for object-search tasks.
+- Use head yaw as a prior in a visual SLAM / semantic mapping loop (attention
+  weighting for keyframe selection).
+- Latency study: BT HID (~40 ms) + gRPC + Spot's body controller — measure the
+  end-to-end lag and whether smoothing or prediction (extrapolating with the
+  gyroscope) helps.
