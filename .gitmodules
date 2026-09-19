@@ -1,0 +1,3 @@
+[submodule "sony-head-tracker"]
+	path = sony-head-tracker
+	url = https://github.com/soujanya957/sony-head-tracker.git
