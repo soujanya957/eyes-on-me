@@ -10,8 +10,8 @@ WH-1000XM5 ──BT──▶ sony-head-tracker ──UDP JSON :4243──▶ eye
 ```
 
 <p align="center">
-  <img src="docs/img/viz.png" width="600" alt="eyes-on-me viz: 3D head gizmo following the headphones, with raw tracker angles, mapped Spot angles, and envelope bars">
-  <br><sub><code>uv run eyes-on-me viz</code> — headphones only, no robot needed</sub>
+  <img src="docs/img/spot.jpg" width="640" alt="Boston Dynamics Spot">
+  <br><sub>Spot photo: <a href="https://commons.wikimedia.org/wiki/File:Spot_by_Boston_Dynamics.jpg">Jonte</a>, <a href="https://creativecommons.org/licenses/by-sa/4.0">CC BY-SA 4.0</a>, via Wikimedia Commons</sub>
 </p>
 
 ## Docs
