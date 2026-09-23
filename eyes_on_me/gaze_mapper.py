@@ -4,14 +4,14 @@ No SDK imports here so it is unit-testable without a robot.
 
 Conventions
 -----------
-* Input yaw/pitch/roll are whatever the head tracker emits, in degrees. The
-  tracker's default axis convention makes yaw positive when you look *left*
-  and pitch positive when you look *up* (OpenTrack style). Use the ``invert_*``
-  flags if your build differs; ``--dry-run`` prints the mapped values so you
-  can check before the robot moves.
+* Input yaw/pitch/roll are whatever the head tracker emits, in degrees. On the
+  WH-1000XM5 (measured 2026-09-22 against Spot) yaw is positive when you look
+  *right* and pitch positive when you look *up*. Use the ``invert_*`` flags if
+  your build differs; ``--dry-run`` prints the mapped values so you can check
+  before the robot moves.
 * Output follows Spot's right-handed body frame: +yaw = nose left (CCW from
-  above), +pitch = nose *down*, +roll = right side down. Hence pitch is
-  inverted by default.
+  above), +pitch = nose *down*, +roll = right side down. Hence yaw and pitch
+  are both inverted by default and roll is not.
 """
 
 from __future__ import annotations
@@ -55,8 +55,8 @@ class GazeConfig:
     deadband_deg: float = 2.0
     # EMA smoothing factor in [0, 1]; 1.0 disables smoothing.
     smoothing: float = 0.35
-    invert_yaw: bool = False
-    invert_pitch: bool = True
+    invert_yaw: bool = True    # measured on the WH-1000XM5: tracker +yaw = look right
+    invert_pitch: bool = True  # tracker +pitch = look up, Spot +pitch = nose down
     invert_roll: bool = False
     # Turn-in-place (``--mode turn``): proportional gain on the yaw the body
     # pose can't cover, and a cap on angular velocity.
@@ -97,6 +97,18 @@ class GazeMapper:
     def recenter(self, yaw: float, pitch: float, roll: float) -> None:
         """Treat the current head pose as 'straight ahead'."""
         self._offset = (yaw, pitch, roll)
+        self._smoothed = None
+
+    def shift_yaw(self, body_deg: float) -> None:
+        """Move 'straight ahead' by ``body_deg`` of mapped body yaw.
+
+        Used when the robot has turned by that much, so the direction it now
+        faces becomes the new zero without asking you to face forward again.
+        """
+        c = self.cfg
+        sign = -1.0 if c.invert_yaw else 1.0
+        head_deg = body_deg / (sign * c.yaw_gain) if c.yaw_gain else 0.0
+        self._offset = (wrap_deg(self._offset[0] + head_deg), self._offset[1], self._offset[2])
         self._smoothed = None
 
     def note_reset_counter(self, counter: int) -> bool:

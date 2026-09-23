@@ -24,8 +24,9 @@ from bosdyn.client.robot_state import RobotStateClient
 from bosdyn.geometry import EulerZXY
 
 from .camera import CameraViewer
-from .gaze_mapper import BodyTarget, GazeMapper
+from .gaze_mapper import BodyTarget, GazeMapper, wrap_deg
 from .head_tracker import HeadTrackerReceiver
+from .touchpad.gestures import ESTOP, GRIPPER_TOGGLE
 
 log = logging.getLogger("eyes_on_me")
 
@@ -40,17 +41,22 @@ class RunOptions:
     external_estop: bool = False
     sit_on_exit: bool = True
     recenter_on_start: bool = True
+    viz: bool = False           # draw the head gizmo alongside the control loop
+    start_paused: bool = True   # stand still until you press s; recenter works while paused
+    touchpad: bool = False      # WH-1000XM5 earcup gestures drive stepping and the gripper
     # Where the gripper sits while it looks around (flat_body frame, metres).
     hand_x: float = 0.6
     hand_y: float = 0.0
-    hand_z: float = 0.45
+    hand_z: float = 0.55
 
 
 class StdinKeys:
-    """Terminal hotkeys (each followed by Enter): r recenter, e settle-then-cut, E cut now."""
+    """Terminal hotkeys (each followed by Enter): r recenter, s start/stop, w stand/walk, e settle-then-cut, E cut now."""
 
     def __init__(self):
         self.recenter = threading.Event()
+        self.toggle = threading.Event()      # start/stop following the head
+        self.walk = threading.Event()        # switch pose (stand) <-> turn (walk)
         self.estop = threading.Event()       # settle (sit) then cut motor power
         self.estop_now = threading.Event()   # cut motor power immediately
         threading.Thread(target=self._run, daemon=True, name="stdin-keys").start()
@@ -60,6 +66,10 @@ class StdinKeys:
             k = line.strip()
             if k.lower() == "r":
                 self.recenter.set()
+            elif k.lower() == "s":
+                self.toggle.set()
+            elif k.lower() == "w":
+                self.walk.set()
             elif k == "e":
                 self.estop.set()
             elif k in ("E", "!"):
@@ -77,6 +87,8 @@ class SpotGaze:
         self._state: RobotStateClient | None = None
         self._heading0 = 0.0
         self._viewer: CameraViewer | None = None
+        self._gizmo = None
+        self._touchpad = None
         self.estopped = False
         if not opts.dry_run:
             sdk = create_standard_sdk("eyes-on-me")
@@ -99,6 +111,15 @@ class SpotGaze:
                 "Robot is e-stopped and --external-estop was given; clear it from the tablet/estop client."
             )
         else:
+            # Spot refuses to reconfigure the e-stop while motors are on, so registering
+            # our own endpoint has to happen before anything powers the robot up. If the
+            # tablet left it powered, say so plainly instead of surfacing MotorsOnError.
+            assert not self.robot.is_powered_on(), (
+                "Spot's motors are already on (the tablet usually did this), and the e-stop "
+                "cannot be reconfigured while they are. Either power the motors off from the "
+                "tablet and rerun, or pass --external-estop to keep the tablet as the e-stop "
+                "(you then lose the s/Space software e-stop in this tool)."
+            )
             estop_client = self.robot.ensure_client(EstopClient.default_service_name)
             endpoint = EstopEndpoint(estop_client, "eyes-on-me", estop_timeout=9.0)
             endpoint.force_simple_setup()
@@ -141,6 +162,12 @@ class SpotGaze:
             self._estop_keepalive.settle_then_cut()
 
     def shutdown(self) -> None:
+        if self._gizmo:
+            self._gizmo.close()
+            self._gizmo = None
+        if self._touchpad is not None:
+            self._touchpad.stop()   # hands the user's volume back
+            self._touchpad = None
         if self.robot is None:
             return
         try:
@@ -148,6 +175,10 @@ class SpotGaze:
                 self._viewer.stop()
             if self.estopped:
                 log.info("e-stopped; leaving motors cut. Clear it from the tablet or rerun.")
+                return
+            if self._lease_keepalive is None:
+                # connect() failed before taking the lease: the robot is not ours to
+                # sit or power off, and trying raises NoSuchLease over the real error.
                 return
             if self.opts.mode == "arm" and self.robot.is_powered_on():
                 log.info("stowing arm")
@@ -196,16 +227,85 @@ class SpotGaze:
             )
             self._cmd.robot_command(cmd)
 
+    def _status(self, paused: bool) -> tuple[str, tuple[int, int, int]]:
+        """Banner for the viz window: red when paused, green when following, plus stand/walk."""
+        stance = {"pose": "  STAND", "turn": "  WALK"}.get(self.opts.mode, "")
+        return ("PAUSED" + stance, (0, 0, 255)) if paused else ("FOLLOWING" + stance, (0, 220, 120))
+
+    def _toggle_walk(self) -> None:
+        """Switch between standing (pose: lean only) and walking (turn: step round to face you).
+
+        Both directions keep "straight ahead" consistent with where the robot
+        actually faces: walking measures turns from here, and standing again
+        re-zeroes the head on the heading the robot walked round to.
+        """
+        if self.opts.mode == "arm":
+            log.warning("w ignored: stand/walk switching is for pose/turn, not arm mode")
+            return
+        now = 0.0 if self.opts.dry_run else self._odom_yaw_deg()
+        if self.opts.mode == "turn":
+            self.mapper.shift_yaw(wrap_deg(now - self._heading0))
+            self.opts.mode = "pose"
+            log.info("STANDING - body leans where you look, feet stay put (w to walk)")
+        else:
+            self.opts.mode = "turn"
+            log.info("WALKING - Spot steps round to face where you look (w to stand)")
+        self._heading0 = now
+
+    def _pump_viewer(self, target: BodyTarget) -> str | None:
+        if self._viewer is None:
+            return None
+        self._viewer.update_auto(target.yaw_deg if self.opts.mode != "arm" else 0.0)
+        return self._viewer.pump()
+
+    def _hold(self) -> None:
+        """Square up and stand still: sent once when paused, so the body does not
+        keep whatever tilt it had when you stopped following."""
+        if self.opts.dry_run:
+            return
+        if self.opts.mode == "arm":
+            self._cmd.robot_command(self._arm_cmd(BodyTarget(0.0, 0.0, 0.0), seconds=1.0))
+            return
+        self._cmd.robot_command(RobotCommandBuilder.synchro_stand_command(
+            body_height=self.opts.body_height, footprint_R_body=EulerZXY(yaw=0.0, roll=0.0, pitch=0.0)
+        ))
+
     # ------------------------------------------------------------------ loop
     def run(self, receiver: HeadTrackerReceiver) -> None:
         period = 1.0 / self.opts.rate_hz
         keys = StdinKeys()
         need_recenter = self.opts.recenter_on_start
+        paused = self.opts.start_paused
         last_log = 0.0
-        log.info("mode=%s camera=%s", self.opts.mode, self.opts.camera)
-        log.info("keys (+Enter):  r recenter   e E-STOP (sit, then cut)   E E-STOP NOW   Ctrl+C quit")
+        if self.opts.viz:
+            from .viz import GizmoWindow
+
+            self._gizmo = GizmoWindow(self.mapper.cfg, receiver._addr[1], arm=self.opts.mode == "arm")
+        gizmo = self._gizmo
+        log.info("mode=%s camera=%s viz=%s", self.opts.mode, self.opts.camera, self.opts.viz)
+        log.info("keys (+Enter):  s start/stop   r recenter   w stand/walk   e E-STOP (sit, then cut)   E E-STOP NOW   Ctrl+C quit")
         if self._viewer:
             log.info("camera window:  r recenter   Space E-STOP (sit, then cut)   Esc E-STOP NOW   q quit")
+        if gizmo:
+            log.info("viz window:     s start/stop   r recenter   w stand/walk   Space E-STOP   Esc E-STOP NOW   q quit")
+        touchpad, tp_actions = None, None
+        if self.opts.touchpad:
+            from .touchpad import TouchpadSource
+            from .touchpad.actions import StepConfig, TouchpadActions
+
+            touchpad = self._touchpad = TouchpadSource().start()
+            tp_actions = TouchpadActions(
+                self._cmd, self._state, StepConfig(), body_height=self.opts.body_height,
+                estop_cb=lambda: self.estop(immediate=False),
+                has_arm=bool(self.robot and self.robot.has_arm()),
+                dry_run=self.opts.dry_run,
+            )
+            log.info("touchpad:      swipe fwd/back = step fwd/back   swipe up/down = step left/right")
+            log.info("touchpad:      double tap = gripper (or abort a step)   double tap x5 = E-STOP")
+
+        if paused:
+            log.info("PAUSED - standing still. Face forward, press r to recenter, then s to start following.")
+            self._hold()
         while True:
             tick = time.monotonic()
             if keys.estop_now.is_set():
@@ -214,11 +314,22 @@ class SpotGaze:
             if keys.estop.is_set():
                 self.estop(immediate=False)
                 return
+            if keys.walk.is_set():
+                keys.walk.clear()
+                self._toggle_walk()
+            if keys.toggle.is_set():
+                keys.toggle.clear()
+                paused = not paused
+                log.info("PAUSED - standing still; r recenters, s resumes." if paused else "FOLLOWING your head.")
+                if paused:
+                    self._hold()
             s = receiver.latest()
             if s is None:
                 if tick - last_log > 2.0:
                     log.warning("no head-tracker samples (is the bridge running on port %s?)", receiver._addr[1])
                     last_log = tick
+                if gizmo:
+                    gizmo.pump(None, None, receiver.packets, self._status(paused))
                 time.sleep(period)
                 continue
 
@@ -240,13 +351,32 @@ class SpotGaze:
             else:
                 target = self.mapper.pose_target(s.yaw, s.pitch, s.roll)
 
-            self._send(target)
+            if touchpad is not None:
+                orientation = EulerZXY(yaw=target.yaw_rad, roll=target.roll_rad, pitch=target.pitch_rad)
+                for action in touchpad.poll(tick, moving=tp_actions.stepping):
+                    if paused and action.name not in (ESTOP, GRIPPER_TOGGLE):
+                        log.info("touchpad: %s ignored while paused (press s to start)", action.name)
+                        continue
+                    tp_actions.run(action, orientation if not paused else None)
+                    if action.name == ESTOP:
+                        return
 
-            if self._viewer:
-                self._viewer.update_auto(target.yaw_deg if self.opts.mode != "arm" else 0.0)
-                event = self._viewer.pump()
+            # A step is a trajectory command; the per-tick stand command would
+            # cancel it, so hold off until the step finishes or is aborted.
+            if not paused and not (tp_actions is not None and tp_actions.stepping):
+                self._send(target)
+
+            for source, event in (("camera window", self._pump_viewer(target)),
+                                  ("viz window", gizmo.pump(s, target, receiver.packets, self._status(paused)) if gizmo else None)):
                 if event == "recenter":
                     need_recenter = True
+                elif event == "walk":
+                    self._toggle_walk()
+                elif event == "toggle":
+                    paused = not paused
+                    log.info("PAUSED - standing still; r recenters, s resumes." if paused else "FOLLOWING your head.")
+                    if paused:
+                        self._hold()
                 elif event == "estop":
                     self.estop(immediate=False)
                     return
@@ -254,13 +384,14 @@ class SpotGaze:
                     self.estop(immediate=True)
                     return
                 elif event == "quit":
-                    log.info("quit from camera window")
+                    log.info("quit from %s", source)
                     return
 
             if self.opts.dry_run or tick - last_log > 0.5:
                 last_log = tick
                 log.info(
-                    "head y=%6.1f p=%6.1f r=%6.1f  ->  body y=%6.1f p=%6.1f r=%6.1f  v_rot=%5.2f",
+                    "%s head y=%6.1f p=%6.1f r=%6.1f  ->  body y=%6.1f p=%6.1f r=%6.1f  v_rot=%5.2f",
+                    "[paused]" if paused else "        ",
                     s.yaw, s.pitch, s.roll, target.yaw_deg, target.pitch_deg, target.roll_deg, target.v_rot_rad_s,
                 )
             time.sleep(max(0.0, period - (time.monotonic() - tick)))

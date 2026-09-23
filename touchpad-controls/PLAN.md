@@ -2,9 +2,90 @@
 
 Use the WH-1000XM5's right-earcup touchpad as a five-button controller for
 Spot, layered on top of head tracking: **head = where to go, touchpad = go /
-stop / posture**. Status: planned, not started.
+stop / posture**. Status: **capture path proven on hardware** (§0); gesture
+decoding and Spot wiring not started.
 
-## 1. What the touchpad can give us
+## 0. Measured on hardware (2026-09-22, macOS 26.5, XM5 fw 2.5.1)
+
+All five signals are confirmed working. **§1 and §3.1 below were wrong and
+are superseded by this section** — they are kept for the reasoning only.
+
+| gesture | arrives as | via |
+| ------- | ---------- | --- |
+| double tap | `pause` / `play` (alternates with our declared state) | `MPRemoteCommandCenter` |
+| swipe forward | `nextTrack` | `MPRemoteCommandCenter` |
+| swipe back | `previousTrack` | `MPRemoteCommandCenter` |
+| swipe up | output volume step up | CoreAudio / polled volume |
+| swipe down | output volume step down | CoreAudio / polled volume |
+| single tap | **nothing** — the headset beeps, sends no transport command | — |
+| press and hold | Siri, not interceptable | — |
+| cover the cup | quick attention, handled in the headphones | — |
+
+### What this changes
+
+1. **`CGEventTap` on `NX_SYSDEFINED` does not work for the touchpad.** The
+   headphones' transport commands reach macOS through MediaRemote and drive
+   the Now Playing app; they never become media-key events. Proven both
+   ways: a double tap paused QuickTime while the event tap logged nothing,
+   and synthetic `CGEventPost` media keys *were* caught by the same tap. The
+   tap only ever sees keyboard media keys. Replace §3.1 with §3.1a.
+2. **Double tap and swipe forward are distinct**, contrary to §1's "hard
+   limit". Through MediaRemote they are `pause` and `nextTrack`. The design
+   does not have to work around a collision.
+3. **Single tap is not a signal on the XM5.** §2's mapping hangs stop,
+   sit/stand and e-stop off `play` taps; all of that must move to double tap
+   (`togglePlayPause`) sequences instead.
+4. **Multipoint is a prerequisite, not a caveat.** With a phone connected,
+   AVRCP goes to the phone and the Mac sees nothing at all, while head
+   tracking keeps working over HID — so the failure looks like a bug in this
+   code rather than a routing problem. Disconnect the phone, or detect and
+   say so loudly at startup.
+
+### 3.1a `remote.py` — transport commands (replaces §3.1)
+
+- `MPRemoteCommandCenter.sharedCommandCenter()`; `setEnabled_(True)` and
+  `addTargetWithHandler_` on `play`, `pause`, `togglePlayPause`,
+  `nextTrack`, `previousTrack` (`seekForward`/`seekBackward` are also
+  registrable if more signals are ever needed).
+- Claim Now Playing: `MPNowPlayingInfoCenter.defaultCenter()` with a title,
+  a duration, `playbackRate` 1.0, and `setPlaybackState_(…Playing)`.
+  Without this macOS has no reason to route anything here.
+- Needs an `NSApplication` run loop
+  (`NSApplicationActivationPolicyAccessory`) on a daemon thread. A bare
+  interpreter is sufficient — **no `.app` bundle required**, confirmed.
+- No Accessibility permission needed, unlike the event tap.
+- Whichever app most recently claimed Now Playing wins, so `eyes-on-me` must
+  re-assert its info to take the slot back from Music/Spotify.
+
+Working reference: `scripts/touchpad-remote-probe.py` (registers the
+handlers and logs what arrives). `scripts/touchpad-probe.py` remains useful
+for the volume channel and for showing what the event tap does *not* see.
+
+Test-rig note: the tracker stream stalled several times mid-session — the
+bridge process stayed alive while its YPR output froze on a repeated value.
+The Bluetooth link was **not** verified to have dropped at those moments (the
+check used at the time was faulty), so the cause is still unknown; a stalled
+sensor session and a dropped link both fit the evidence. Before trusting a
+run, confirm the stream is live rather than assuming:
+
+```bash
+sony-head-tracker-macos dump --seconds 3 | grep -c SAMPLE   # want ~75 at 25 pps
+```
+
+To check the Bluetooth link itself, note that `system_profiler` indents
+`Connected:` with 6 spaces, and a pattern expecting more silently matches
+nothing and reads as "not connected":
+
+```bash
+system_profiler SPBluetoothDataType \
+  | awk '/^ *Connected:/{c=1;next} /^ *Not Connected:/{c=0} c' | grep -q WH-1000XM5
+```
+
+## 1. What the touchpad can give us (superseded — see §0)
+
+> Kept for the reasoning. The signal table and the "hard limits" below were
+> measured wrong: see §0 for what the hardware actually does.
+
 
 The headphones decide the gesture in firmware and send a standard Bluetooth
 AVRCP command. macOS turns those into exactly five observable signals:

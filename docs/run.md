@@ -39,28 +39,60 @@ battery, motor state, system faults, arm present, camera sources, and whether
 the head tracker is streaming locally. Fix anything marked `FAIL` before
 running; `warn` lines are informational (e.g. the tablet holding the lease).
 
-**Terminal 2 — drive Spot.** Credentials come from a git-ignored `.env`
-(`cp .env.example .env`, then set `SPOT_IP`, `SPOT_USER`, `SPOT_PASS`). Make
-sure the Mac is on the robot's network (`ping $SPOT_IP`), the robot is on with
+**Terminal 2 — drive Spot.** Each robot has its own git-ignored
+`.env.<name>` holding `SPOT_IP`, `SPOT_USER`, `SPOT_PASS` (`cp .env.example
+.env.tusker`). `--robot <name>` picks one; without it, the `SPOT_ROBOT` line in
+`.env` decides (currently `tusker`). The log's first line says which robot and
+IP it picked. Make
+sure the Mac is on the robot's network (`ping <its SPOT_IP>`), the robot is on with
 motors unlocked, and nothing else holds the lease (release control on the
 tablet or it will be stolen — that's expected).
 
 ```bash
 uv run eyes-on-me                 # pose mode: body tilt only, feet stay put
+uv run eyes-on-me --robot rooter  # same, on rooter
 ```
 
 What happens: connect → register e-stop → take lease → power on → stand →
-first head sample becomes "straight ahead" → body follows your head at 20 Hz.
+**stands still, paused**. It does not follow your head until you press `s`.
+Face forward, press `r` to make that straight-ahead, then `s` to start. Press
+`s` again any time to stop: Spot squares up and holds still, and you can
+recenter and restart from there. `--start-active` skips the pause and follows
+immediately (the old behaviour).
 **Ctrl+C** sits Spot and powers off (`--no-sit` to leave it standing).
 
-Keys while running (terminal keys need Enter; camera-window keys don't):
+Add `--viz` to get the head gizmo next to the robot:
 
-| action                          | terminal      | camera window |
-| ------------------------------- | ------------- | ------------- |
-| recenter                        | `r` + Enter   | `r`           |
-| **E-STOP**: sit, then cut power | `e` + Enter   | `Space`       |
-| **E-STOP**: cut power now       | `E` + Enter   | `Esc`         |
-| quit normally (sit, power off)  | Ctrl+C        | `q`           |
+```bash
+uv run eyes-on-me --viz            # gizmo + robot, one process
+```
+
+This is a flag rather than a second terminal on purpose: `eyes-on-me viz`
+binds the tracker's UDP port itself, so it **cannot** run at the same time as
+`run` — whichever starts second dies with `Address already in use`. `--viz`
+draws the same window from the control loop's own receiver.
+
+Keys while running (terminal keys need Enter; window keys don't):
+
+| action                          | terminal      | camera window | viz window |
+| ------------------------------- | ------------- | ------------- | ---------- |
+| **start/stop following**        | `s` + Enter   | —             | `s`        |
+| **stand / walk** (pose ↔ turn)  | `w` + Enter   | —             | `w`        |
+| recenter                        | `r` + Enter   | `r`           | `r`        |
+| **E-STOP**: sit, then cut power | `e` + Enter   | `Space`       | `Space`    |
+| **E-STOP**: cut power now       | `E` + Enter   | `Esc`         | `Esc`      |
+| quit normally (sit, power off)  | Ctrl+C        | `q`           | `q`        |
+
+`w` switches between standing (`pose`: the body leans where you look, feet
+stay put) and walking (`turn`: Spot also steps round to face you). The banner
+shows which one, e.g. **FOLLOWING WALK**. Straight-ahead carries over: after
+walking round, standing again treats the direction Spot now faces as forward,
+so you don't need to recenter. `w` does nothing in `--mode arm`.
+
+While paused the log prefixes every line with `[paused]` and the viz window
+shows a red **PAUSED** banner (green **FOLLOWING** once started). The mapped
+body angles keep updating while paused, so you can see exactly what Spot
+*would* do before you commit to it.
 
 The software e-stop goes through the e-stop endpoint this process registers.
 "Cut now" drops motor power immediately (Spot falls if standing); "sit, then
@@ -74,14 +106,56 @@ Once pose mode feels right, in open space:
 uv run eyes-on-me --mode turn     # also steps round when you look past ±25°
 ```
 
-A hostname on the command line overrides `SPOT_IP`. Common variants:
+A hostname on the command line overrides the robot's `SPOT_IP`. Common variants:
 
 ```bash
-uv run eyes-on-me --invert-yaw                 # yaw went the wrong way
+uv run eyes-on-me --no-invert-yaw              # yaw went the wrong way
 uv run eyes-on-me --smoothing 0.2 --deadband 3 # calmer
 uv run eyes-on-me --external-estop             # keep the tablet as e-stop
 uv run eyes-on-me --body-height -0.1           # stand lower
 ```
+
+## Touchpad (WH-1000XM5 earcup)
+
+```bash
+uv run eyes-on-me --viz --touchpad
+```
+
+| gesture | action |
+| ------- | ------ |
+| swipe forward | one step forward (0.5 m) |
+| swipe back | one step back (0.4 m) |
+| swipe up | one step **left** (0.4 m) |
+| swipe down | one step **right** (0.4 m) |
+| double tap | gripper open/close - or **abort the step** if one is running |
+| double tap x5 in 2 s | E-STOP (settle, then cut) |
+
+Steering stays with your head: a step goes where the body is pointing, so
+look where you want to go, then swipe. Each step is a trajectory command with
+a fixed relative goal, so a stray swipe moves Spot one step and stops - there
+is no velocity left running.
+
+A double tap means two things on purpose. While a step is running it aborts
+immediately; idle, it toggles the gripper. Stopping must be the fastest thing
+on the controller, and the touchpad has only five signals. The cost is that an
+*idle* tap waits ~0.4 s before the gripper moves, in case it turns out to be
+the first of the five that mean e-stop; an aborting tap is never delayed.
+
+Single tap does nothing - the XM5 beeps but sends no command. Press-and-hold
+is Siri and cover-the-cup is quick attention; neither reaches the Mac.
+
+**Disconnect your phone first.** With multipoint the headset sends gestures
+to whichever device last played audio, so with a phone connected the Mac sees
+nothing at all - while head tracking keeps working, because that rides a
+different link. Try the gestures with no robot first:
+
+```bash
+uv run eyes-on-me touchpad-test           # prints actions, moves nothing
+uv run eyes-on-me touchpad-test --moving  # pretend a step runs: taps abort
+```
+
+While `--touchpad` is on, swipes no longer change what you hear; your volume
+is restored on exit.
 
 ## Modes
 
@@ -90,7 +164,7 @@ uv run eyes-on-me --body-height -0.1           # stand lower
 | `pose` | Head yaw/pitch/roll → `synchro_stand_command` body orientation, clamped to ±25°/±20°/±12°.     |
 | `turn` | Same, but yaw beyond the body envelope becomes a capped turn-in-place velocity. Heading is   |
 |        | closed-loop on odometry, so Spot's *heading + body yaw* converges to your head yaw.           |
-| `arm`  | Spot Arm only. Stands, unstows, lifts the gripper to a look pose in front of the body, then   |
+| `arm`  | Spot Arm only. Stands, unstows, lifts the gripper to a raised ready pose in front of the body, |
 |        | your head drives the gripper's orientation (±70°/±50°/±30°) via `arm_pose_command`. The      |
 |        | body stays still. The hand camera is shown by default. Arm is stowed on exit.               |
 
@@ -112,7 +186,7 @@ fetched at ~10 fps on a background thread; the control loop is unaffected.
 ## Arm mode
 
 ```bash
-uv run eyes-on-me --mode arm                       # hand hovers at (0.6, 0, 0.45) m
+uv run eyes-on-me --mode arm                       # hand hovers at (0.6, 0, 0.55) m
 uv run eyes-on-me --mode arm --hand-pos 0.7 0 0.6  # higher / further out
 uv run eyes-on-me --mode arm --arm-max-yaw 90      # wider sweep
 ```
@@ -126,7 +200,7 @@ before sitting.
 ## Tuning flags
 
 `--max-yaw/--max-pitch/--max-roll`, `--arm-max-*`, `--*-gain`, `--deadband`, `--smoothing`,
-`--invert-yaw`, `--no-invert-pitch`, `--invert-roll`, `--turn-kp`,
+`--no-invert-yaw`, `--no-invert-pitch`, `--invert-roll`, `--turn-kp`,
 `--max-turn-rate`, `--rate`. Run `uv run eyes-on-me -h` for defaults.
 
 Tracker pitch is inverted by default (tracker +pitch = look up, Spot +pitch =

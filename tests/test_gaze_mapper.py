@@ -1,11 +1,35 @@
 import math
+import os
+
+import pytest
 
 from eyes_on_me.gaze_mapper import GazeConfig, GazeMapper, apply_deadband, wrap_deg
 from eyes_on_me.head_tracker import parse_sample
 
 
 def mapper(**kw):
+    """Mapper for the mechanics tests below (clamping, recentre, turn split).
+
+    Yaw inversion is incidental to those, and un-inverted yaw keeps the
+    expectations readable, so it is off here. The shipped defaults are pinned
+    separately by :func:`test_default_axis_convention`.
+    """
+    kw.setdefault("invert_yaw", False)
     return GazeMapper(GazeConfig(smoothing=1.0, deadband_deg=0.0, **kw))
+
+
+def test_default_axis_convention():
+    """The signs eyes-on-me ships with, measured on the WH-1000XM5 against Spot.
+
+    Look right -> body yaws right (Spot +yaw is nose *left*, so negative);
+    look up -> nose up (Spot +pitch is nose *down*, so negative); roll is not
+    inverted and carries the 0.5 roll gain.
+    """
+    m = GazeMapper(GazeConfig(smoothing=1.0, deadband_deg=0.0))
+    t = m.pose_target(yaw=10, pitch=10, roll=10)
+    assert t.yaw_deg == -10.0
+    assert t.pitch_deg == -10.0
+    assert t.roll_deg == 5.0
 
 
 def test_wrap():
@@ -57,7 +81,7 @@ def test_turn_rate_is_capped():
 
 
 def test_smoothing_converges():
-    m = GazeMapper(GazeConfig(smoothing=0.5, deadband_deg=0.0))
+    m = GazeMapper(GazeConfig(smoothing=0.5, deadband_deg=0.0, invert_yaw=False))
     for _ in range(20):
         t = m.pose_target(10, 0, 0)
     assert math.isclose(t.yaw_deg, 10.0, abs_tol=1e-3)
@@ -90,3 +114,37 @@ def test_camera_for_yaw():
     assert camera_for_yaw(60) == "left"
     assert camera_for_yaw(-60) == "right"
     assert camera_for_yaw(170) == "back"
+
+
+def test_shift_yaw_rezeroes_on_the_walked_heading():
+    """Standing again after walking: the heading Spot turned to becomes straight ahead."""
+    for m in (mapper(), GazeMapper(GazeConfig())):  # plain, and shipped (inverted yaw)
+        m.recenter(10, 0, 0)
+        walked = m.head_to_body(40, 0, 0)[0]  # pretend Spot turned all the way to face the head
+        m.shift_yaw(walked)
+        assert abs(m.head_to_body(40, 0, 0)[0]) < 1e-9
+
+
+def test_robot_selection(tmp_path, monkeypatch):
+    from eyes_on_me import cli
+    argv = ["run", "--robot", "rooter", "--viz"]
+    assert cli.pop_robot(argv) == "rooter" and argv == ["run", "--viz"]
+    argv = ["--robot=tusker"]
+    assert cli.pop_robot(argv) == "tusker" and argv == []
+
+    (tmp_path / ".env").write_text("SPOT_ROBOT=tusker\n")
+    (tmp_path / ".env.tusker").write_text("SPOT_IP=10.0.0.1\nSPOT_USER=t\n")
+    (tmp_path / ".env.rooter").write_text("SPOT_IP=10.0.0.2\nSPOT_USER=r\n")
+    monkeypatch.setattr(cli, "REPO", tmp_path)
+    monkeypatch.chdir(tmp_path)
+    for k in ("SPOT_ROBOT", "SPOT_IP", "SPOT_USER", "BOSDYN_CLIENT_USERNAME"):
+        monkeypatch.delenv(k, raising=False)
+    assert cli.load_env() == "tusker"
+    assert os.environ["SPOT_IP"] == "10.0.0.1"
+    for k in ("SPOT_ROBOT", "SPOT_IP", "SPOT_USER", "BOSDYN_CLIENT_USERNAME"):
+        monkeypatch.delenv(k, raising=False)
+    assert cli.load_env("rooter") == "rooter"
+    assert os.environ["SPOT_IP"] == "10.0.0.2" and os.environ["BOSDYN_CLIENT_USERNAME"] == "r"
+    assert cli.robots() == ["rooter", "tusker"]
+    with pytest.raises(SystemExit, match="known robots: rooter, tusker"):
+        cli.load_env("nope")

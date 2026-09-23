@@ -90,6 +90,77 @@ def bar(img: np.ndarray, x: int, y: int, value: float, limit: float, label: str,
     cv2.putText(img, f"{label} {value:6.1f} / ±{limit:.0f}", (x + w + 10, y + 12), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (220, 220, 220), 1)
 
 
+def draw_frame(img, s, t, cfg: GazeConfig, arm: bool, pps: float, port: int,
+               status: tuple[str, tuple[int, int, int]] | None, keys_hint: str) -> None:
+    """One frame: gizmo, raw/mapped angles, envelope bars.
+
+    ``s``/``t`` are ``None`` until the first sample arrives. ``status`` is an
+    optional (text, colour) banner the run loop uses for PAUSED/ACTIVE.
+    """
+    if s is None or t is None:
+        cv2.putText(img, f"waiting for tracker on 127.0.0.1:{port} ...", (20, 40), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
+        cv2.putText(img, "start it with ./scripts/run-tracker.sh", (20, 70), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (200, 200, 200), 1)
+        draw_gizmo(img, np.eye(3), (W // 2, H // 2 + 20), 90)
+    else:
+        draw_gizmo(img, rot_zyx(t.yaw_rad, t.pitch_rad, t.roll_rad), (W // 2, H // 2 + 20), 90)
+        cv2.putText(img, f"WH-1000XM5  {pps:4.1f} pkt/s   resets={s.reset_counter}", (20, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (160, 160, 160), 1)
+        cv2.putText(img, f"raw   yaw {s.yaw:7.1f}  pitch {s.pitch:7.1f}  roll {s.roll:7.1f}", (20, 58), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (200, 200, 200), 1)
+        cv2.putText(img, f"spot  yaw {t.yaw_deg:7.1f}  pitch {t.pitch_deg:7.1f}  roll {t.roll_deg:7.1f}   ({'arm' if arm else 'body'} envelope)", (20, 84), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 220, 120), 1)
+        lim = ((cfg.max_arm_yaw_deg, cfg.max_arm_pitch_deg, cfg.max_arm_roll_deg) if arm
+               else (cfg.max_body_yaw_deg, cfg.max_body_pitch_deg, cfg.max_body_roll_deg))
+        bar(img, 20, H - 90, t.yaw_deg, lim[0], "yaw  ", (0, 255, 0))
+        bar(img, 20, H - 62, t.pitch_deg, lim[1], "pitch", (255, 80, 0))
+        bar(img, 20, H - 34, t.roll_deg, lim[2], "roll ", (0, 0, 255))
+    if status is not None:
+        text, colour = status
+        (tw, _), _ = cv2.getTextSize(text, cv2.FONT_HERSHEY_SIMPLEX, 0.8, 2)
+        cv2.putText(img, text, (W - tw - 20, 34), cv2.FONT_HERSHEY_SIMPLEX, 0.8, colour, 2)
+    cv2.putText(img, keys_hint, (20, H - 8), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (120, 120, 120), 1)
+
+
+class GizmoWindow:
+    """The viz gizmo, drawn by an external control loop that owns the receiver.
+
+    Two processes cannot both read the tracker's UDP port, so ``run --viz``
+    draws the gizmo here rather than shelling out to ``eyes-on-me viz``.
+    Drawing must happen on the main thread (macOS/OpenCV), same as
+    :class:`~eyes_on_me.camera.CameraViewer`.
+    """
+
+    KEYS = "r recenter   s start/stop   w stand/walk   Space E-STOP   Esc E-STOP NOW   q quit"
+
+    def __init__(self, cfg: GazeConfig, port: int, arm: bool = False):
+        self.cfg, self.port, self.arm = cfg, port, arm
+        self._last_pk, self._last_t, self._pps = 0, time.monotonic(), 0.0
+        cv2.namedWindow(WINDOW)
+
+    def pump(self, s, t, packets: int, status) -> str | None:
+        """Draw a frame; return a key event ('recenter', 'toggle', 'walk', 'estop', 'estop_now', 'quit')."""
+        now = time.monotonic()
+        if now - self._last_t >= 1.0:
+            self._pps, self._last_pk, self._last_t = (packets - self._last_pk) / (now - self._last_t), packets, now
+        img = np.full((H, W, 3), 18, np.uint8)
+        draw_frame(img, s, t, self.cfg, self.arm, self._pps, self.port, status, self.KEYS)
+        cv2.imshow(WINDOW, img)
+        key = cv2.waitKey(1) & 0xFF
+        if key == 27:  # Esc
+            return "estop_now"
+        if key == ord(" "):
+            return "estop"
+        if key == ord("q"):
+            return "quit"
+        if key == ord("r"):
+            return "recenter"
+        if key == ord("s"):
+            return "toggle"
+        if key == ord("w"):
+            return "walk"
+        return None
+
+    def close(self) -> None:
+        cv2.destroyWindow(WINDOW)
+
+
 def main(port: int, cfg: GazeConfig, arm: bool = False) -> int:
     rx = HeadTrackerReceiver(port=port).start()
     mapper = GazeMapper(cfg)
@@ -104,25 +175,13 @@ def main(port: int, cfg: GazeConfig, arm: bool = False) -> int:
             now = time.monotonic()
             if now - last_t >= 1.0:
                 pps, last_pk, last_t = (rx.packets - last_pk) / (now - last_t), rx.packets, now
-            if s is None:
-                cv2.putText(img, f"waiting for tracker on 127.0.0.1:{port} ...", (20, 40), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
-                cv2.putText(img, "start it with ./scripts/run-tracker.sh", (20, 70), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (200, 200, 200), 1)
-                draw_gizmo(img, np.eye(3), (W // 2, H // 2 + 20), 90)
-            else:
+            t = None
+            if s is not None:
                 if need_recenter:
                     mapper.recenter(s.yaw, s.pitch, s.roll)
                     need_recenter = False
                 t = mapper.arm_target(s.yaw, s.pitch, s.roll) if arm else mapper.pose_target(s.yaw, s.pitch, s.roll)
-                draw_gizmo(img, rot_zyx(t.yaw_rad, t.pitch_rad, t.roll_rad), (W // 2, H // 2 + 20), 90)
-                cv2.putText(img, f"{'WH-1000XM5' if s else ''}  {pps:4.1f} pkt/s   resets={s.reset_counter}", (20, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (160, 160, 160), 1)
-                cv2.putText(img, f"raw   yaw {s.yaw:7.1f}  pitch {s.pitch:7.1f}  roll {s.roll:7.1f}", (20, 58), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (200, 200, 200), 1)
-                cv2.putText(img, f"spot  yaw {t.yaw_deg:7.1f}  pitch {t.pitch_deg:7.1f}  roll {t.roll_deg:7.1f}   ({'arm' if arm else 'body'} envelope)", (20, 84), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 220, 120), 1)
-                c = cfg
-                lim = (c.max_arm_yaw_deg, c.max_arm_pitch_deg, c.max_arm_roll_deg) if arm else (c.max_body_yaw_deg, c.max_body_pitch_deg, c.max_body_roll_deg)
-                bar(img, 20, H - 90, t.yaw_deg, lim[0], "yaw  ", (0, 255, 0))
-                bar(img, 20, H - 62, t.pitch_deg, lim[1], "pitch", (255, 80, 0))
-                bar(img, 20, H - 34, t.roll_deg, lim[2], "roll ", (0, 0, 255))
-            cv2.putText(img, "r recenter   a body/arm   q quit", (W - 300, H - 12), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (120, 120, 120), 1)
+            draw_frame(img, s, t, cfg, arm, pps, port, None, "r recenter   a body/arm   q quit")
             cv2.imshow(WINDOW, img)
             key = cv2.waitKey(16) & 0xFF
             if key == ord("q") or cv2.getWindowProperty(WINDOW, cv2.WND_PROP_VISIBLE) < 1:

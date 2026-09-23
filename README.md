@@ -36,8 +36,9 @@ uv run eyes-on-me --mode arm      # gripper follows your head, hand cam
 ./scripts/test-software.sh        # all software tests, no hardware
 ```
 
-Credentials go in a git-ignored `.env` (`SPOT_IP`, `SPOT_USER`, `SPOT_PASS`);
-see `.env.example`.
+Each robot's credentials go in a git-ignored `.env.<name>` (`SPOT_IP`,
+`SPOT_USER`, `SPOT_PASS`), picked with `--robot <name>`; `.env` holds the
+default `SPOT_ROBOT`. See `.env.example`.
 
 ## Layout
 
@@ -58,5 +59,5 @@ scripts/
   fake-tracker.py   synthetic tracker stream for testing without headphones
   test-software.sh  tier-1 test runner
 sony-head-tracker/  submodule (fork of NicholasSlattery/sony-head-tracker)
-.env.example        template for SPOT_IP / SPOT_USER / SPOT_PASS
+.env.example        template for a robot's .env.<name> (SPOT_IP / USER / PASS)
 ```
