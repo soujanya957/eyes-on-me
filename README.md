@@ -33,6 +33,7 @@ uv run eyes-on-me check           # robot pre-flight (read-only)
 uv run eyes-on-me                 # drive Spot, pose mode
 uv run eyes-on-me --mode turn     # + turn in place
 uv run eyes-on-me --mode arm      # gripper follows your head, hand cam
+uv run eyes-on-me --sim --viz     # no robot: drive a MuJoCo Spot with the headphones
 ./scripts/test-software.sh        # all software tests, no hardware
 ```
 
@@ -50,10 +51,12 @@ eyes_on_me/
   viz.py            `eyes-on-me viz`: headphones-only 3D gizmo
   check.py          `eyes-on-me check`: robot pre-flight
   spot_gaze.py      lease / e-stop / power / arm / control loop
+  touchpad/         XM5 earcup gestures -> steps, gripper, e-stop
+  sim/              `--sim`: kinematic MuJoCo Spot that takes the real SDK commands
   cli.py            entry point: `eyes-on-me [run|viz|check]`
 tests/              pytest, no robot needed
 docs/               setup.md, run.md, testing.md, ideas.md
-touchpad-controls/  PLAN.md (not built yet)
+touchpad-controls/  PLAN.md
 scripts/
   run-tracker.sh    build + start the head-tracker bridge
   fake-tracker.py   synthetic tracker stream for testing without headphones

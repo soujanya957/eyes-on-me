@@ -36,6 +36,9 @@ def build_parser() -> argparse.ArgumentParser:
                    help="show a Spot camera in a window. auto follows head yaw. Default: hand in arm mode, else none. "
                         "Window keys: 1-6 pick camera, 0 auto, r recenter, q quit.")
     p.add_argument("--dry-run", action="store_true", help="print mapped body targets; never talk to Spot")
+    p.add_argument("--sim", action="store_true",
+                   help="drive a MuJoCo Spot in a window instead of a robot (headphones still needed, or "
+                        "scripts/fake-tracker.py). Kinematic: shows the commands, not real walking physics.")
     p.add_argument("--viz", action="store_true",
                    help="show the head gizmo next to the robot (one process: `eyes-on-me viz` cannot run alongside, "
                         "both would bind the same UDP port)")
@@ -156,7 +159,7 @@ def main(argv: list[str] | None = None) -> int:
     robot = load_env(pop_robot(argv))
     sub = argv.pop(0) if argv and argv[0] in SUBCOMMANDS else "run"
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s", datefmt="%H:%M:%S")
-    if robot and sub in ("run", "check"):
+    if robot and sub == "check":
         logging.getLogger("eyes_on_me").info("robot: %s (%s)", robot, os.environ.get("SPOT_IP", "no SPOT_IP"))
 
     if sub == "viz":
@@ -196,12 +199,14 @@ def main(argv: list[str] | None = None) -> int:
         return check_main(ca.hostname, ca.udp_port)
 
     args = build_parser().parse_args(argv)
-    if not args.dry_run and not args.hostname:
+    if robot and not (args.sim or args.dry_run):
+        logging.getLogger("eyes_on_me").info("robot: %s (%s)", robot, args.hostname or "no SPOT_IP")
+    if not args.dry_run and not args.sim and not args.hostname:
         print("error: give a hostname or pick a robot with --robot (or use --dry-run)", file=sys.stderr)
         return 2
 
     cfg = cfg_from_args(args)
-    camera = args.camera if args.camera is not None else ("hand" if args.mode == "arm" else "none")
+    camera = args.camera if args.camera is not None else ("hand" if args.mode == "arm" and not args.sim else "none")
     opts = RunOptions(
         mode=args.mode,
         camera=camera,
@@ -214,6 +219,7 @@ def main(argv: list[str] | None = None) -> int:
         viz=args.viz,
         start_paused=not args.start_active,
         touchpad=args.touchpad,
+        sim=args.sim,
         hand_x=args.hand_pos[0],
         hand_y=args.hand_pos[1],
         hand_z=args.hand_pos[2],

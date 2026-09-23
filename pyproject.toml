@@ -5,6 +5,7 @@ requires-python = ">=3.12"
 dependencies = [
     "bosdyn-api>=5.2.0",
     "bosdyn-client>=5.2.0",
+    "mujoco>=3.14.0",
     "numpy>=1.26",
     "opencv-python>=4.9",
     "pyobjc-framework-mediaplayer>=10 ; sys_platform == 'darwin'",

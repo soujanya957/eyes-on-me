@@ -115,6 +115,36 @@ uv run eyes-on-me --external-estop             # keep the tablet as e-stop
 uv run eyes-on-me --body-height -0.1           # stand lower
 ```
 
+## Simulator (no robot)
+
+`--sim` swaps the robot for a MuJoCo Spot in a window. The headphones drive it
+exactly as they would drive tusker, through the same control loop: the sim
+accepts the real SDK commands (stand with body offset, turn, touchpad steps,
+arm pose, gripper) and reports its pose back the way Spot does. Everything else
+works unchanged: `s`, `w`, `r`, e-stops, `--touchpad`, `--mode arm`.
+
+```bash
+./scripts/run-tracker.sh                     # terminal 1, as usual
+uv run eyes-on-me --sim --viz                # terminal 2: sim + head gizmo
+uv run eyes-on-me --sim --mode arm --touchpad
+uv run scripts/fake-tracker.py --port 4299 & uv run eyes-on-me --sim --udp-port 4299   # no headphones
+```
+
+The first run downloads Spot-with-arm from
+[MuJoCo Menagerie](https://github.com/google-deepmind/mujoco_menagerie)
+into `~/.cache/eyes-on-me/menagerie` (set `EYES_ON_ME_MENAGERIE` to use your
+own checkout). Coloured posts ring the start point (red ahead, yellow left,
+blue behind, pink right) so you can see where Spot faces. The inset shows
+Spot's view: the hand camera when the arm is out, else a camera on its nose.
+Window keys: the usual ones plus `[` `]` orbit, `-` `=` zoom, `c` chase camera on/off.
+
+**It is kinematic, not a physics sim.** Spot's walking comes from Boston
+Dynamics' controller, which isn't modelled. The sim poses the body directly,
+keeps the feet planted with leg IK, and trots them to new footholds when Spot
+turns or steps. The arm is solved by IK. So it shows what the commands ask
+for, at speeds and slew rates close to Spot's. It tells you nothing about
+balance, slipping, or how the real controller behaves near its limits.
+
 ## Touchpad (WH-1000XM5 earcup)
 
 ```bash

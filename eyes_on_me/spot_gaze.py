@@ -44,6 +44,7 @@ class RunOptions:
     viz: bool = False           # draw the head gizmo alongside the control loop
     start_paused: bool = True   # stand still until you press s; recenter works while paused
     touchpad: bool = False      # WH-1000XM5 earcup gestures drive stepping and the gripper
+    sim: bool = False           # drive a MuJoCo Spot instead of a robot (eyes_on_me.sim)
     # Where the gripper sits while it looks around (flat_body frame, metres).
     hand_x: float = 0.6
     hand_y: float = 0.0
@@ -89,8 +90,10 @@ class SpotGaze:
         self._viewer: CameraViewer | None = None
         self._gizmo = None
         self._touchpad = None
+        self._sim = None
+        self._sim_win = None
         self.estopped = False
-        if not opts.dry_run:
+        if not opts.dry_run and not opts.sim:
             sdk = create_standard_sdk("eyes-on-me")
             self.robot = sdk.create_robot(hostname)
 
@@ -98,6 +101,9 @@ class SpotGaze:
     def connect(self) -> None:
         if self.opts.dry_run:
             log.info("dry run: not connecting to Spot")
+            return
+        if self.opts.sim:
+            self._connect_sim()
             return
         from bosdyn.client.util import authenticate
 
@@ -148,8 +154,50 @@ class SpotGaze:
             image_client = self.robot.ensure_client(ImageClient.default_service_name)
             self._viewer = CameraViewer(image_client, self.opts.camera).start()
 
+    def _connect_sim(self) -> None:
+        """Same start-up as the robot - power on, stand, unstow - on the MuJoCo Spot.
+
+        The sim takes the robot's own command and state calls, so it stands in
+        for both the command and the state client and nothing downstream knows.
+        """
+        from .sim import SimSpot
+        from .sim.window import SimWindow
+
+        log.info("sim: MuJoCo Spot (kinematic pose + IK, not a physics or walking-controller model)")
+        self._sim = SimSpot()
+        self._cmd = self._state = self._sim
+        self._sim_win = SimWindow(self._sim)
+        if self.opts.camera != "none":
+            log.info("sim: --camera ignored; the sim window shows Spot's front / hand view itself")
+            self.opts.camera = "none"
+        log.info("powering on")
+        log.info("standing")
+        self._sim.power_on()
+        self._sim_settle(1.5)
+        self._heading0 = self._odom_yaw_deg()
+        if self.opts.mode == "arm":
+            log.info("unstowing arm")
+            self._cmd.robot_command(RobotCommandBuilder.arm_ready_command())
+            log.info("raising hand to look pose (%.2f, %.2f, %.2f)", self.opts.hand_x, self.opts.hand_y, self.opts.hand_z)
+            self._cmd.robot_command(self._arm_cmd(BodyTarget(0.0, 0.0, 0.0), seconds=2.0))
+            self._sim_settle(2.0)
+
+    def _sim_settle(self, seconds: float) -> None:
+        """Let the sim play out a blocking step (stand, unstow, sit) on screen."""
+        end = time.monotonic() + seconds
+        while time.monotonic() < end:
+            self._sim.step()
+            if self._sim_win.pump(None) == "quit":
+                return
+            time.sleep(0.02)
+
     def estop(self, immediate: bool) -> None:
         """Software e-stop through our own endpoint (unavailable with --external-estop)."""
+        if self._sim is not None:
+            self.estopped = True
+            log.critical("E-STOP (sim): %s", "cutting motor power NOW" if immediate else "settling (sit) then cutting")
+            self._sim.estop(immediate)
+            return
         if self._estop_keepalive is None:
             log.error("E-STOP requested but this process holds no e-stop endpoint (--external-estop); use the tablet")
             return
@@ -168,6 +216,14 @@ class SpotGaze:
         if self._touchpad is not None:
             self._touchpad.stop()   # hands the user's volume back
             self._touchpad = None
+        if self._sim is not None:
+            if not self.estopped and self.opts.sit_on_exit:
+                log.info("sitting and powering off")
+                self._sim.power_off()
+            self._sim_settle(2.5)   # let the sit / e-stop play out on screen
+            self._sim_win.close()
+            self._sim = self._sim_win = None
+            return
         if self.robot is None:
             return
         try:
@@ -297,7 +353,7 @@ class SpotGaze:
             tp_actions = TouchpadActions(
                 self._cmd, self._state, StepConfig(), body_height=self.opts.body_height,
                 estop_cb=lambda: self.estop(immediate=False),
-                has_arm=bool(self.robot and self.robot.has_arm()),
+                has_arm=bool((self.robot and self.robot.has_arm()) or self._sim),
                 dry_run=self.opts.dry_run,
             )
             log.info("touchpad:      swipe fwd/back = step fwd/back   swipe up/down = step left/right")
@@ -308,6 +364,8 @@ class SpotGaze:
             self._hold()
         while True:
             tick = time.monotonic()
+            if self._sim is not None:
+                self._sim.step(tick)
             if keys.estop_now.is_set():
                 self.estop(immediate=True)
                 return
@@ -330,6 +388,13 @@ class SpotGaze:
                     last_log = tick
                 if gizmo:
                     gizmo.pump(None, None, receiver.packets, self._status(paused))
+                if self._sim_win is not None:
+                    event = self._sim_win.pump(self._status(paused))
+                    if event in ("estop", "estop_now"):
+                        self.estop(immediate=event == "estop_now")
+                        return
+                    if event == "quit":
+                        return
                 time.sleep(period)
                 continue
 
@@ -367,7 +432,8 @@ class SpotGaze:
                 self._send(target)
 
             for source, event in (("camera window", self._pump_viewer(target)),
-                                  ("viz window", gizmo.pump(s, target, receiver.packets, self._status(paused)) if gizmo else None)):
+                                  ("viz window", gizmo.pump(s, target, receiver.packets, self._status(paused)) if gizmo else None),
+                                  ("sim window", self._sim_win.pump(self._status(paused)) if self._sim_win else None)):
                 if event == "recenter":
                     need_recenter = True
                 elif event == "walk":
